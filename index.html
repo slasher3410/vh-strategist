@@ -50,8 +50,9 @@
 
         const { useState, useEffect, useRef, useMemo } = React;
 
-        // --- 1. FIREBASE CONFIGURATION (GLOBAL) ---
-        const firebaseConfig = {
+        // --- 1. FIREBASE CONFIGURATION ---
+        // Uses environment config if available (Canvas), otherwise uses your hardcoded config (GitHub)
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
             apiKey: "AIzaSyACWatSZgxcdaa8y-YxPCZsUGDiUNyXXjA",
             authDomain: "vh-strategist.firebaseapp.com",
             projectId: "vh-strategist",
@@ -61,13 +62,10 @@
             measurementId: "G-GY2CZDW3HE"
         };
 
-        // Standardized Singleton initialization
-        const fbApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-        const auth = getAuth(fbApp);
-        const db = getFirestore(fbApp);
-        
-        // CRITICAL: Unify the Path Identifier for save vs load
-        const CLAN_DATA_ID = 'vh-strategist-v10'; 
+        const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'vh-strategist-final-v1'; 
 
         const PASSCODE = "VH2026";
         const CLASSES = ["Barbarian", "Crusader", "Demon Hunter", "Monk", "Necromancer", "Wizard", "Blood Knight", "Tempest", "Druid"];
@@ -107,9 +105,8 @@
             const [selectedScoutClan, setSelectedScoutClan] = useState('All Intelligence');
             const [selectedSide, setSelectedSide] = useState('red');
             const scoutFileRef = useRef(null);
-            const apiKey = ""; // Gemini API Key
 
-            // 1. Authentication Handshake
+            // 1. Authentication Handshake (Rule 3)
             useEffect(() => {
                 const initAuth = async () => {
                     try {
@@ -120,7 +117,7 @@
                         }
                     } catch (err) {
                         console.error("Firebase Handshake Error:", err);
-                        setAuthError(err.code || "Handshake Blocked");
+                        setAuthError(err.code || "Handshake Fail");
                     }
                 };
                 initAuth();
@@ -131,11 +128,11 @@
             // 2. Presence Tracking
             useEffect(() => {
                 if (!user || !isAuthorized) return;
-                const presenceRef = doc(db, 'artifacts', CLAN_DATA_ID, 'public', 'data', 'presence', user.uid);
+                const presenceRef = doc(db, 'artifacts', appId, 'public', 'data', 'presence', user.uid);
                 const updatePresence = () => setDoc(presenceRef, { lastSeen: Date.now() }, { merge: true });
                 updatePresence();
                 const heartbeat = setInterval(updatePresence, 30000);
-                const unsubPresence = onSnapshot(collection(db, 'artifacts', CLAN_DATA_ID, 'public', 'data', 'presence'), snap => {
+                const unsubPresence = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'presence'), snap => {
                     const now = Date.now();
                     const activeUsers = snap.docs.filter(d => (now - (d.data().lastSeen || 0)) < 90000);
                     setOnlineCount(activeUsers.length);
@@ -143,19 +140,19 @@
                 return () => { clearInterval(heartbeat); unsubPresence(); deleteDoc(presenceRef).catch(() => {}); };
             }, [user, isAuthorized]);
 
-            // 3. Real-time Listeners (Crucial - uses CLAN_DATA_ID)
+            // 3. Real-time Listeners (Crucial - Rule 1 & 2)
             useEffect(() => {
                 if (!user || !isAuthorized) return;
                 
-                const unsubRoster = onSnapshot(collection(db, 'artifacts', CLAN_DATA_ID, 'public', 'data', 'roster'), snap => {
+                const unsubRoster = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'roster'), snap => {
                     setRoster(snap.docs.map(d => ({ id: d.id, ...d.data() })));
                 }, (err) => setAuthError(`Roster Read Error: ${err.message}`));
 
-                const unsubPlan = onSnapshot(doc(db, 'artifacts', CLAN_DATA_ID, 'public', 'data', 'plan', 'current'), snap => {
+                const unsubPlan = onSnapshot(doc(db, 'artifacts', appId, 'public', 'data', 'plan', 'current'), snap => {
                     if (snap.exists()) setActivePlan(snap.data());
                 }, (err) => console.error("Plan Error:", err));
 
-                const unsubScout = onSnapshot(collection(db, 'artifacts', CLAN_DATA_ID, 'public', 'data', 'scouting'), snap => {
+                const unsubScout = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'scouting'), snap => {
                     setScoutingReports(snap.docs.map(d => ({ id: d.id, ...d.data() })));
                 }, (err) => console.error("Scout Error:", err));
                 
@@ -187,9 +184,9 @@
                 if (!lines.length) return 0;
                 
                 const batch = writeBatch(db);
-                const rosterColl = collection(db, 'artifacts', CLAN_DATA_ID, 'public', 'data', 'roster');
+                const rosterColl = collection(db, 'artifacts', appId, 'public', 'data', 'roster');
                 
-                // Fetch and delete old ones to prevent duplicates
+                // Clear existing
                 const existing = await getDocs(rosterColl);
                 existing.forEach(d => batch.delete(d.ref));
 
@@ -198,11 +195,10 @@
 
                 for (let i = startIndex; i < lines.length && count < 100; i++) {
                     const line = lines[i];
-                    // Detect Tab (copy/paste) or Comma (file)
                     let cols = line.includes('\t') ? line.split('\t') : robustCSVParse(line);
                     cols = cols.map(c => c.trim().replace(/^"|"$/g, ''));
 
-                    // GREEDY DETECTION: Search every column for a valid class name
+                    // Keyword based column detection
                     let classIdx = cols.findIndex(val => CLASSES.some(cls => cls.toLowerCase() === val.toLowerCase()));
                     
                     let n, c, p;
@@ -216,8 +212,7 @@
                         else continue;
                     }
 
-                    // Strict sanitization - ensure name exists and isn't just a header
-                    if (!n || n.toLowerCase().includes("name") || n.toLowerCase() === "class") continue;
+                    if (!n || n.toLowerCase().includes("name")) continue;
 
                     batch.set(doc(rosterColl), {
                         name: n,
@@ -227,42 +222,39 @@
                     });
                     count++;
                 }
-                
-                if (count > 0) {
-                    await batch.commit();
-                }
+                if (count > 0) await batch.commit();
                 return count;
             };
 
             const syncSheet = async () => {
                 const url = "https://docs.google.com/spreadsheets/d/e/2PACX-1vT-BnLQTULXGprJlOeOsDQQmvQISTFuKI9wsvDSX7A8YLiBOEF9ljpOPD_QW2Jp5NhJF-fjmxWozE0J/pub?gid=254744248&single=true&output=csv";
                 setIsProcessing(true);
-                notify("Connecting to Datastream...", "info");
+                notify("Pulling Datastream...", "info");
                 try {
                     const res = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`);
                     const text = await res.text();
                     const count = await processRosterData(text, false);
                     if (count > 0) notify(`Success: Deployed ${count} Members`, "success");
-                    else notify("Empty Set: Check spreadsheet row 15.", "rose");
+                    else notify("Empty result: Row 15 mismatch.", "rose");
                 } catch (e) { 
-                    notify("Sync Connection Failed. Use Manual Paste box.", "rose"); 
+                    notify("Proxy Blocked. Use manual box.", "rose"); 
                     setShowManualBox(true);
                 } finally { setIsProcessing(false); }
             };
 
             const applyManualPaste = async () => {
-                if (!manualCsv.trim()) return notify("Paste data into the box", "rose");
+                if (!manualCsv.trim()) return notify("Paste data first", "rose");
                 setIsProcessing(true);
                 try {
                     const count = await processRosterData(manualCsv, true);
                     if (count > 0) { 
-                        notify(`Import Success: ${count} Members Visible`, "success"); 
+                        notify(`Import Success: ${count} Members`, "success"); 
                         setManualCsv(""); 
                         setShowManualBox(false); 
                     } else {
-                        notify("Import Failed: Check column layout", "rose");
+                        notify("Import Failed: Data not recognized.", "rose");
                     }
-                } catch (e) { notify("Database refused write.", "rose"); }
+                } catch (e) { notify("Database connection refused.", "rose"); }
                 finally { setIsProcessing(false); }
             };
 
@@ -271,8 +263,8 @@
                     <div className="min-h-screen flex items-center justify-center p-6 text-center bg-[#020617]">
                         <div className="max-w-sm w-full bg-slate-900 border border-slate-800 p-10 rounded-3xl shadow-2xl animate-in">
                             <div className="w-20 h-20 bg-blue-600 rounded-3xl mx-auto flex items-center justify-center mb-8 shadow-lg shadow-blue-500/20"><Lock className="text-white" size={40} /></div>
-                            <h1 className="text-2xl font-black uppercase mb-2 italic tracking-tighter leading-none">Command Secure</h1>
-                            <p className="text-slate-500 text-[10px] font-bold uppercase tracking-widest mb-10">Verification Required</p>
+                            <h1 className="text-2xl font-black uppercase mb-2 italic">VH Strategic</h1>
+                            <p className="text-slate-500 text-[10px] font-bold uppercase tracking-widest mb-10">Command Access Required</p>
                             <input 
                                 type="password" 
                                 onChange={e => { if(e.target.value.toUpperCase() === PASSCODE) setIsAuthorized(true); }} 
@@ -301,7 +293,7 @@
                             <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
                                 <div className="space-y-4">
                                     <div className="bg-slate-900 p-5 rounded-3xl border border-slate-800 shadow-xl">
-                                        <h4 className="text-[10px] font-black text-blue-500 uppercase mb-4 tracking-widest flex items-center gap-2 font-mono"><Zap size={12}/> Tactics</h4>
+                                        <h4 className="text-[10px] font-black text-blue-500 uppercase mb-4 tracking-widest flex items-center gap-2 font-mono"><Zap size={12}/> Strategies</h4>
                                         {STRATEGIES.map(s => (
                                             <button key={s.id} onClick={async () => {
                                                 const sorted = [...roster].sort((a,b) => b.power - a.power);
@@ -312,8 +304,8 @@
                                                     else if (i < 48) assigns[p.id] = `eminent-${rNum}`;
                                                     else assigns[p.id] = `famed-${rNum}`;
                                                 });
-                                                await setDoc(doc(db, 'artifacts', CLAN_DATA_ID, 'public', 'data', 'plan', 'current'), { strategy: s.id, assignments: assigns, confirmations: activePlan.confirmations || {} }, { merge: true });
-                                                notify("Live deployment updated", "success");
+                                                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'plan', 'current'), { strategy: s.id, assignments: assigns, confirmations: activePlan.confirmations || {} }, { merge: true });
+                                                notify("Strategic alignment updated", "success");
                                             }} className={`w-full text-left p-3 mb-2 rounded-xl border-2 transition-all ${activePlan.strategy === s.id ? 'border-blue-500 bg-blue-900/10' : 'border-transparent bg-slate-800'}`}>
                                                 <div className="text-xs font-bold uppercase">{s.name}</div>
                                                 <p className="text-[9px] text-slate-500">{s.desc}</p>
@@ -340,7 +332,7 @@
                                                                         <button onClick={async () => {
                                                                             const states = ['unconfirmed', 'confirmed', 'busy'];
                                                                             const next = states[(states.indexOf(activePlan.confirmations?.[m.id] || 'unconfirmed') + 1) % states.length];
-                                                                            await setDoc(doc(db, 'artifacts', CLAN_DATA_ID, 'public', 'data', 'plan', 'current'), { confirmations: { ...activePlan.confirmations, [m.id]: next } }, { merge: true });
+                                                                            await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'plan', 'current'), { confirmations: { ...activePlan.confirmations, [m.id]: next } }, { merge: true });
                                                                         }} className={`p-1 transition-colors text-${status.color}-500`}>{status.icon}</button>
                                                                     </div>
                                                                 );
@@ -359,7 +351,7 @@
                             <div className="space-y-6">
                                 <div className="flex flex-col md:flex-row justify-between items-start md:items-end bg-slate-900 p-6 rounded-3xl border border-slate-800 gap-6 shadow-2xl">
                                     <div className="space-y-4 w-full">
-                                        <h2 className="text-xl font-black uppercase text-blue-500 italic tracking-tighter leading-none">Intelligence Hub</h2>
+                                        <h2 className="text-xl font-black uppercase text-blue-500 italic tracking-tighter leading-none">Target Intel Hub</h2>
                                         <div className="flex flex-wrap gap-2">
                                             <button onClick={() => setSelectedScoutClan('All Intelligence')} className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase border transition-all ${selectedScoutClan === 'All Intelligence' ? 'bg-blue-600 border-blue-500 text-white shadow-lg' : 'bg-slate-950 border-slate-800 text-slate-500'}`}>OVERVIEW</button>
                                             {TARGET_CLANS.map(clan => (
@@ -371,7 +363,7 @@
                                         const files = e.target.files;
                                         if (!files.length) return;
                                         setIsProcessing(true);
-                                        notify(`AI Analysis in progress...`, "info");
+                                        notify(`AI Scanning...`, "info");
                                         try {
                                             const base64 = await new Promise(r => {
                                                 const reader = new FileReader();
@@ -380,11 +372,11 @@
                                             });
                                             const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=`, {
                                                 method: 'POST',
-                                                body: JSON.stringify({ contents: [{ parts: [{ text: 'JSON extract names and rooms: {"matches": [{"player": "Name", "room": "Exalted-1"}]}' }, { inlineData: { mimeType: "image/png", data: base64 } }] }] })
+                                                body: JSON.stringify({ contents: [{ parts: [{ text: 'JSON extract Character and Room: {"matches": [{"player": "Name", "room": "Exalted-1"}]}' }, { inlineData: { mimeType: "image/png", data: base64 } }] }] })
                                             });
                                             const json = await res.json();
                                             const data = JSON.parse(json.candidates[0].content.parts[0].text.replace(/```json|```/g, '').trim());
-                                            await addDoc(collection(db, 'artifacts', CLAN_DATA_ID, 'public', 'data', 'scouting'), { ...data, clanName: selectedScoutClan, side: selectedSide, timestamp: Date.now() });
+                                            await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'scouting'), { ...data, clanName: selectedScoutClan, side: selectedSide, timestamp: Date.now() });
                                             notify("Intelligence Secured", "success");
                                         } catch (err) { notify("AI Blocked", "rose"); }
                                         finally { setIsProcessing(false); }
@@ -394,7 +386,7 @@
                                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                                     {scoutingReports.filter(r => selectedScoutClan === 'All Intelligence' || r.clanName === selectedScoutClan).sort((a,b) => b.timestamp - a.timestamp).map(report => (
                                         <div key={report.id} className={`bg-slate-900 p-4 rounded-2xl border ${report.side === 'red' ? 'border-rose-900/30' : 'border-blue-900/30'} shadow-xl transition-all`}>
-                                            <div className="flex justify-between items-center mb-3"><div className="flex flex-col"><span className={`text-[10px] font-black uppercase ${report.side === 'red' ? 'text-rose-500' : 'text-blue-500'}`}>{report.clanName || "Detected"}</span><span className="text-[8px] font-bold text-slate-500 uppercase">{new Date(report.timestamp).toLocaleDateString()}</span></div><button onClick={() => deleteDoc(doc(db, 'artifacts', CLAN_DATA_ID, 'public', 'data', 'scouting', report.id))} className="text-slate-700 hover:text-rose-500"><Trash2 size={14}/></button></div>
+                                            <div className="flex justify-between items-center mb-3"><div className="flex flex-col"><span className={`text-[10px] font-black uppercase ${report.side === 'red' ? 'text-rose-500' : 'text-blue-500'}`}>{report.clanName || "Detected"}</span><span className="text-[8px] font-bold text-slate-500 uppercase">{new Date(report.timestamp).toLocaleDateString()}</span></div><button onClick={() => deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'scouting', report.id))} className="text-slate-700 hover:text-rose-500"><Trash2 size={14}/></button></div>
                                             <div className="flex flex-wrap gap-1">{report.matches?.map((m, i) => <span key={i} className="text-[8px] bg-black px-1.5 py-0.5 rounded border border-slate-800 global-name">{m.player}</span>)}</div>
                                         </div>
                                     ))}
@@ -435,7 +427,7 @@
                                                 <p className="text-xs font-bold truncate global-name">{p.name}</p>
                                                 <p className="text-[9px] text-slate-500 uppercase font-black">{p.class} • {p.power} PWR</p>
                                             </div>
-                                            <button onClick={() => deleteDoc(doc(db, 'artifacts', CLAN_DATA_ID, 'public', 'data', 'roster', p.id))} className="text-slate-700 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition-all p-2 transition-all"><Trash2 size={14}/></button>
+                                            <button onClick={() => deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'roster', p.id))} className="text-slate-700 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition-all p-2 transition-all"><Trash2 size={14}/></button>
                                         </div>
                                     ))}
                                 </div>
@@ -447,7 +439,7 @@
                         <div className="flex items-center gap-4">
                             <div className="flex items-center gap-2">
                                 <div className={`w-2 h-2 rounded-full ${user ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]' : 'bg-rose-500'}`} />
-                                <span>Cloud {user ? 'Connected' : (authError ? `Sync Error (${authError})` : 'Uplinking...')}</span>
+                                <span>Cloud {user ? 'Connected' : (authError ? `Auth Error (${authError})` : 'Uplinking...')}</span>
                             </div>
                             <div className="h-4 w-px bg-slate-800" />
                             <div className="flex items-center gap-2 text-blue-400">
@@ -456,7 +448,7 @@
                             </div>
                         </div>
                         <div className="hidden sm:flex items-center gap-2 italic">
-                            <span>Vault Hunter Tactical Hub v10.1 (Data Patch)</span>
+                            <span>Vault Hunter Tactical Hub v10.2 (Stability Patch)</span>
                         </div>
                     </footer>
 
