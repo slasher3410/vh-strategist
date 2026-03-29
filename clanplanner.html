@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VH Tactical Command</title>
+    <!-- Modern Web Engine -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <script type="importmap">
+    {
+        "imports": {
+            "react": "https://esm.sh/react@18",
+            "react-dom": "https://esm.sh/react-dom@18",
+            "lucide-react": "https://esm.sh/lucide-react@0.454.0?external=react",
+            "firebase/app": "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js",
+            "firebase/auth": "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js",
+            "firebase/firestore": "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js"
+        }
+    }
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&family=Noto+Sans+SC:wght@400;700&display=swap');
+        body { font-family: 'Inter', 'Noto Sans SC', sans-serif; background-color: #020617; color: #f1f5f9; overflow-x: hidden; margin: 0; }
+        .animate-in { animation: fadeIn 0.4s ease-out forwards; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        #root:empty::before {
+            content: 'SECURE BOOT INITIALIZING...';
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            font-size: 10px; font-weight: 900; letter-spacing: 0.3em; color: #3b82f6; opacity: 0.6;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module">
+        import { initializeApp, getApps, getApp } from 'firebase/app';
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+        import { getFirestore, collection, doc, setDoc, onSnapshot, getDocs, writeBatch, deleteDoc, addDoc, serverTimestamp } from 'firebase/firestore';
+        import { 
+            Shield, Sword, Zap, Lock, Globe, RefreshCw, Clock, CheckCircle2, 
+            Trash2, Database, Target, Layers, Search, XCircle, Users, Info
+        } from 'lucide-react';
+
+        const { useState, useEffect, useRef, useMemo } = React;
+
+        // --- 1. FIREBASE CONFIGURATION ---
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+            apiKey: "AIzaSyACWatSZgxcdaa8y-YxPCZsUGDiUNyXXjA",
+            authDomain: "vh-strategist.firebaseapp.com",
+            projectId: "vh-strategist",
+            storageBucket: "vh-strategist.firebasestorage.app",
+            messagingSenderId: "548150032886",
+            appId: "1:548150032886:web:6acd40355a1996fb216fd7",
+            measurementId: "G-GY2CZDW3HE"
+        };
+
+        const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const targetAppId = typeof __app_id !== 'undefined' ? __app_id : 'vh-strategist-final'; 
+
+        const PASSCODE = "VH2026";
+        const CLASSES = ["Barbarian", "Crusader", "Demon Hunter", "Monk", "Necromancer", "Wizard", "Blood Knight", "Tempest", "Druid"];
+        const TARGET_CLANS = ["Dead Rabbits", "HXINQ", "Mythic", "ominous", "Toxic"];
+        const TIERS = [
+            { id: 'exalted', name: 'Exalted', pts: 8 },
+            { id: 'eminent', name: 'Eminent', pts: 4 },
+            { id: 'famed', name: 'Famed', pts: 2 },
+            { id: 'proud', name: 'Proud', pts: 1 }
+        ];
+
+        const CONFIRMATION_STATES = {
+            unconfirmed: { icon: <Clock size={12}/>, color: 'slate' },
+            confirmed: { icon: <CheckCircle2 size={12}/>, color: 'emerald' },
+            busy: { icon: <XCircle size={12}/>, color: 'rose' }
+        };
+
+        const STRATEGIES = [
+            { id: 'balanced', name: 'Balanced Power', desc: 'Top 24 split across all Exalted rooms.', icon: Shield },
+            { id: 'stacked', name: 'Stacked Heavy', desc: 'Focus power on rooms 1 & 2 only.', icon: Sword },
+            { id: 'dvg', name: 'Volume Rush', desc: 'Flood lower matches for total wins.', icon: Zap }
+        ];
+
+        const robustCSVParse = (line) => {
+            const result = [];
+            let current = '';
+            let inQuotes = false;
+            for (let i = 0; i < line.length; i++) {
+                const char = line[i];
+                if (char === '"') inQuotes = !inQuotes;
+                else if (char === ',' && !inQuotes) { result.push(current.trim()); current = ''; }
+                else current += char;
+            }
+            result.push(current.trim());
+            return result;
+        };
+
+        function App() {
+            const [user, setUser] = useState(null);
+            const [isAuthorized, setIsAuthorized] = useState(false);
+            const [activeTab, setActiveTab] = useState('war');
+            const [roster, setRoster] = useState([]);
+            const [activePlan, setActivePlan] = useState({ strategy: 'balanced', assignments: {}, confirmations: {} });
+            const [scoutingReports, setScoutingReports] = useState([]);
+            const [onlineCount, setOnlineCount] = useState(0);
+            
+            const [selectedScoutClan, setSelectedScoutClan] = useState('All Intelligence');
+            const [selectedSide, setSelectedSide] = useState('red');
+            const [isProcessing, setIsProcessing] = useState(false);
+            const [message, setMessage] = useState(null);
+            const [authError, setAuthError] = useState(null);
+            const scoutFileRef = useRef(null);
+
+            const apiKey = ""; // Gemini API Key provided by env
+
+            // 1. Initial Authentication
+            useEffect(() => {
+                const initAuth = async () => {
+                    try {
+                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                            await signInWithCustomToken(auth, __initial_auth_token);
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                    } catch (err) {
+                        console.error("Firebase Auth Error:", err);
+                        setAuthError(err.code || err.message);
+                    }
+                };
+                initAuth();
+                const unsubscribe = onAuthStateChanged(auth, (u) => {
+                    setUser(u);
+                    if (u) setAuthError(null);
+                });
+                return () => unsubscribe();
+            }, []);
+
+            // 2. Presence Tracking (Online Log)
+            useEffect(() => {
+                if (!user || !isAuthorized) return;
+
+                const presenceRef = doc(db, 'artifacts', targetAppId, 'public', 'data', 'presence', user.uid);
+                const updatePresence = () => setDoc(presenceRef, { lastSeen: Date.now() }, { merge: true });
+                
+                updatePresence();
+                const heartbeat = setInterval(updatePresence, 30000);
+
+                const presenceQuery = collection(db, 'artifacts', targetAppId, 'public', 'data', 'presence');
+                const unsubPresence = onSnapshot(presenceQuery, (snap) => {
+                    const now = Date.now();
+                    const active = snap.docs.filter(d => (now - d.data().lastSeen) < 90000); 
+                    setOnlineCount(active.length);
+                }, (err) => console.error("Presence Error:", err));
+
+                return () => {
+                    clearInterval(heartbeat);
+                    unsubPresence();
+                    deleteDoc(presenceRef).catch(() => {});
+                };
+            }, [user, isAuthorized]);
+
+            // 3. Real-time Data Sync
+            useEffect(() => {
+                if (!user || !isAuthorized) return;
+                
+                const rosterQuery = collection(db, 'artifacts', targetAppId, 'public', 'data', 'roster');
+                const unsubRoster = onSnapshot(rosterQuery, snap => {
+                    setRoster(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+                }, (err) => console.error("Roster Stream Error:", err));
+
+                const planDocRef = doc(db, 'artifacts', targetAppId, 'public', 'data', 'plan', 'current');
+                const unsubPlan = onSnapshot(planDocRef, snap => {
+                    if (snap.exists()) setActivePlan(snap.data());
+                }, (err) => console.error("Plan Stream Error:", err));
+
+                const scoutingQuery = collection(db, 'artifacts', targetAppId, 'public', 'data', 'scouting');
+                const unsubScout = onSnapshot(scoutingQuery, snap => {
+                    setScoutingReports(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+                }, (err) => console.error("Scouting Stream Error:", err));
+                
+                return () => { unsubRoster(); unsubPlan(); unsubScout(); };
+            }, [user, isAuthorized]);
+
+            const notify = (text, type = "info") => {
+                setMessage({ text, type });
+                setTimeout(() => setMessage(null), 4000);
+            };
+
+            const syncSheet = async () => {
+                if (!user) return notify("Authenticating...", "rose");
+                const url = "https://docs.google.com/spreadsheets/d/e/2PACX-1vT-BnLQTULXGprJlOeOsDQQmvQISTFuKI9wsvDSX7A8YLiBOEF9ljpOPD_QW2Jp5NhJF-fjmxWozE0J/pub?gid=254744248&single=true&output=csv";
+                setIsProcessing(true);
+                notify("Pulling Roster Data...", "info");
+                try {
+                    const res = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`);
+                    const content = await res.text();
+                    const lines = content.split(/\r\n|\n|\r/).filter(l => l.trim().length > 0);
+                    
+                    const batch = writeBatch(db);
+                    const rosterColl = collection(db, 'artifacts', targetAppId, 'public', 'data', 'roster');
+                    const existing = await getDocs(rosterColl);
+                    existing.forEach(d => batch.delete(d.ref));
+
+                    let count = 0;
+                    for (let i = 14; i < lines.length && count < 100; i++) {
+                        const cols = lines[i].split(',').map(c => c.trim().replace(/^"|"$/g, ''));
+                        if (!cols[3] || cols[3].toLowerCase().includes("name")) continue;
+
+                        const newDocRef = doc(rosterColl);
+                        batch.set(newDocRef, {
+                            name: cols[3],
+                            class: CLASSES.find(cl => cl.toLowerCase() === cols[4]?.toLowerCase()) || 'Barbarian',
+                            power: parseInt(cols[5]?.replace(/[^\d]/g, '')) || 0
+                        });
+                        count++;
+                    }
+                    await batch.commit();
+                    notify(`Deployed ${count} Members to Cloud`, "success");
+                } catch (e) { 
+                    console.error("Sync Error:", e);
+                    notify("Sync Failed. Try manual paste.", "rose"); 
+                } finally { setIsProcessing(false); }
+            };
+
+            const handleScoutScan = async (e) => {
+                if (!user) return;
+                const files = e.target.files;
+                if (!files.length) return;
+                setIsProcessing(true);
+                notify(`AI Analysis: Scanning ${selectedScoutClan}...`, "info");
+                try {
+                    const base64 = await new Promise(r => {
+                        const reader = new FileReader();
+                        reader.onload = () => r(reader.result.split(',')[1]);
+                        reader.readAsDataURL(files[0]);
+                    });
+                    const instruction = selectedSide === 'red' ? "STRICT: Only RED side names." : "STRICT: Only BLUE side names.";
+                    const prompt = `JSON extraction: {"matches": [{"player": "Name", "room": "Exalted-1"}]}. ${instruction} Extract player names from Diablo screenshots.`;
+                    
+                    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
+                        method: 'POST',
+                        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType: "image/png", data: base64 } }] }] })
+                    });
+                    const json = await res.json();
+                    const rawText = json.candidates[0].content.parts[0].text;
+                    const data = JSON.parse(rawText.replace(/```json|```/g, '').trim());
+                    
+                    const scoutColl = collection(db, 'artifacts', targetAppId, 'public', 'data', 'scouting');
+                    await addDoc(scoutColl, { 
+                        ...data, 
+                        clanName: selectedScoutClan, 
+                        side: selectedSide, 
+                        timestamp: Date.now() 
+                    });
+                    notify("Intelligence Captured", "success");
+                } catch (err) { 
+                    console.error("AI Scan Error:", err);
+                    notify("AI Scan Failed", "rose"); 
+                } finally { setIsProcessing(false); }
+            };
+
+            const filteredReports = useMemo(() => {
+                if (selectedScoutClan === 'All Intelligence') return scoutingReports;
+                return scoutingReports.filter(r => r.clanName === selectedScoutClan);
+            }, [scoutingReports, selectedScoutClan]);
+
+            if (!isAuthorized) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center p-6 text-center bg-[#020617]">
+                        <div className="max-w-sm w-full bg-slate-900 border border-slate-800 p-10 rounded-3xl shadow-2xl animate-in">
+                            <div className="w-20 h-20 bg-blue-600 rounded-3xl mx-auto flex items-center justify-center mb-8 shadow-lg shadow-blue-500/20"><Lock className="text-white" size={40} /></div>
+                            <h1 className="text-2xl font-black uppercase mb-2 tracking-tighter italic">Secure Access</h1>
+                            <p className="text-slate-500 text-[10px] font-bold uppercase tracking-widest mb-10">Vault Hunter Command Terminal</p>
+                            <input type="password" maxLength={6} onChange={e => { if(e.target.value.toUpperCase() === PASSCODE) setIsAuthorized(true); }} placeholder="ACCESS CODE" className="w-full bg-black border border-slate-800 p-5 rounded-2xl text-center text-3xl font-black focus:border-blue-500 outline-none transition-all placeholder:text-slate-800 tracking-[0.2em]" autoFocus />
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="min-h-screen pb-20 selection:bg-blue-500/30">
+                    <header className="h-16 border-b border-slate-800 bg-slate-900/50 backdrop-blur-md flex items-center px-6 justify-between sticky top-0 z-50">
+                        <div className="flex items-center gap-2 font-black italic uppercase text-sm tracking-tighter"><Shield className="text-blue-500" size={20}/> <span>VH STRATEGIST</span></div>
+                        <div className="bg-slate-800 p-1 rounded-xl flex gap-1">
+                            {['war', 'scouting', 'roster'].map(t => (
+                                <button key={t} onClick={() => setActiveTab(t)} className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all ${activeTab === t ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400'}`}>{t}</button>
+                            ))}
+                        </div>
+                    </header>
+
+                    <main className="max-w-6xl mx-auto p-4 sm:p-6 animate-in">
+                        {activeTab === 'war' && (
+                            <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
+                                <div className="space-y-4">
+                                    <div className="bg-slate-900 p-5 rounded-3xl border border-slate-800 shadow-xl">
+                                        <h4 className="text-[10px] font-black text-blue-500 uppercase mb-4 tracking-widest flex items-center gap-2"><Zap size={12}/> Strategies</h4>
+                                        {STRATEGIES.map(s => (
+                                            <button key={s.id} onClick={async () => {
+                                                const sorted = [...roster].sort((a,b) => b.power - a.power);
+                                                const assigns = {};
+                                                sorted.forEach((p, i) => {
+                                                    const roomNum = (i % 3) + 1;
+                                                    if (i < 24) assigns[p.id] = `exalted-${roomNum}`;
+                                                    else if (i < 48) assigns[p.id] = `eminent-${roomNum}`;
+                                                    else assigns[p.id] = `famed-${roomNum}`;
+                                                });
+                                                const planRef = doc(db, 'artifacts', targetAppId, 'public', 'data', 'plan', 'current');
+                                                await setDoc(planRef, { strategy: s.id, assignments: assigns, confirmations: activePlan.confirmations || {} }, { merge: true });
+                                                notify("Cloud Plan Updated", "success");
+                                            }} className={`w-full text-left p-3 mb-2 rounded-xl border-2 transition-all ${activePlan.strategy === s.id ? 'border-blue-500 bg-blue-900/10' : 'border-transparent bg-slate-800 hover:bg-slate-700'}`}>
+                                                <div className="text-xs font-bold uppercase">{s.name}</div>
+                                                <p className="text-[9px] text-slate-500">{s.desc}</p>
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                                <div className="lg:col-span-3 space-y-10">
+                                    {TIERS.map(tier => (
+                                        <div key={tier.id}>
+                                            <div className="flex items-center gap-3 mb-4 text-[10px] font-black uppercase text-slate-500 italic"><span>{tier.name}</span><div className="h-px flex-1 bg-slate-800"/></div>
+                                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                                {[1,2,3].map(n => {
+                                                    const room = `${tier.id}-${n}`;
+                                                    const members = roster.filter(p => activePlan.assignments?.[p.id] === room);
+                                                    return (
+                                                        <div key={room} className="bg-slate-900 rounded-2xl border border-slate-800 p-3 min-h-[100px] hover:border-slate-700 transition-colors">
+                                                            <div className="flex justify-between items-center mb-3 pb-2 border-b border-slate-800"><span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Room {n}</span><span className="text-[9px] font-black text-blue-500">{members.length}</span></div>
+                                                            {members.map(m => {
+                                                                const statusKey = activePlan.confirmations?.[m.id] || 'unconfirmed';
+                                                                const status = CONFIRMATION_STATES[statusKey];
+                                                                return (
+                                                                    <div key={m.id} className="flex justify-between items-center bg-black/40 p-2 rounded-lg mb-1 group">
+                                                                        <span className="text-[10px] font-bold truncate pr-2 global-name">{m.name}</span>
+                                                                        <button onClick={async () => {
+                                                                            const states = ['unconfirmed', 'confirmed', 'busy'];
+                                                                            const next = states[(states.indexOf(statusKey) + 1) % states.length];
+                                                                            const planRef = doc(db, 'artifacts', targetAppId, 'public', 'data', 'plan', 'current');
+                                                                            await setDoc(planRef, { confirmations: { ...activePlan.confirmations, [m.id]: next } }, { merge: true });
+                                                                        }} className={`p-1 transition-colors text-${status.color}-500`}>{status.icon}</button>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'scouting' && (
+                            <div className="space-y-6">
+                                <div className="flex flex-col md:flex-row justify-between items-start md:items-end bg-slate-900 p-6 rounded-3xl border border-slate-800 gap-6 shadow-2xl">
+                                    <div className="space-y-4 w-full">
+                                        <h2 className="text-xl font-black uppercase text-blue-500 italic tracking-tighter">Enemy Intelligence Hub</h2>
+                                        <div className="flex flex-wrap gap-2">
+                                            <button onClick={() => setSelectedScoutClan('All Intelligence')} className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase border transition-all ${selectedScoutClan === 'All Intelligence' ? 'bg-blue-600 border-blue-500 text-white shadow-lg' : 'bg-slate-950 border-slate-800 text-slate-500'}`}>OVERVIEW</button>
+                                            {TARGET_CLANS.map(clan => (
+                                                <button key={clan} onClick={() => setSelectedScoutClan(clan)} className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase border transition-all ${selectedScoutClan === clan ? 'bg-emerald-600 border-emerald-500 text-white shadow-lg' : 'bg-slate-950 border-slate-800 text-slate-500'}`}>{clan}</button>
+                                            ))}
+                                        </div>
+                                        <div className="flex gap-2 bg-black p-1 rounded-xl w-fit border border-slate-800 shadow-inner">
+                                            <button onClick={() => setSelectedSide('red')} className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all flex items-center gap-2 ${selectedSide === 'red' ? 'bg-rose-600 text-white shadow-lg' : 'text-slate-500'}`}><Target size={12} /> Red (Enemy)</button>
+                                            <button onClick={() => setSelectedSide('blue')} className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all flex items-center gap-2 ${selectedSide === 'blue' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-500'}`}><Shield size={12} /> Blue (Friendly)</button>
+                                        </div>
+                                    </div>
+                                    <input type="file" ref={scoutFileRef} className="hidden" onChange={handleScoutScan} accept="image/*" />
+                                    <button disabled={isProcessing} onClick={() => scoutFileRef.current.click()} className="w-full md:w-auto bg-blue-600 px-8 py-4 rounded-2xl font-black text-xs uppercase flex items-center justify-center gap-2 shadow-lg hover:bg-blue-700 transition-all">{isProcessing ? <RefreshCw className="animate-spin" size={16}/> : <Search size={16}/>} Capture Intel</button>
+                                </div>
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                    {filteredReports.sort((a,b) => b.timestamp - a.timestamp).map(report => (
+                                        <div key={report.id} className={`bg-slate-900 p-4 rounded-2xl border ${report.side === 'red' ? 'border-rose-900/30' : 'border-blue-900/30'} shadow-xl transition-all`}>
+                                            <div className="flex justify-between items-center mb-3"><div className="flex flex-col"><span className={`text-[10px] font-black uppercase ${report.side === 'red' ? 'text-rose-500' : 'text-blue-500'}`}>{report.clanName || "Detected"}</span><span className="text-[8px] font-bold text-slate-500 uppercase">{new Date(report.timestamp).toLocaleDateString()}</span></div><button onClick={() => deleteDoc(doc(db, 'artifacts', targetAppId, 'public', 'data', 'scouting', report.id))} className="text-slate-700 hover:text-rose-500"><Trash2 size={14}/></button></div>
+                                            <div className="flex flex-wrap gap-1">{report.matches?.map((m, i) => <span key={i} className="text-[8px] bg-black px-1.5 py-0.5 rounded opacity-80 border border-slate-800 global-name">{m.player}</span>)}</div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'roster' && (
+                            <div className="space-y-6">
+                                <div className="flex flex-col md:flex-row justify-between items-center bg-slate-900 p-8 rounded-3xl border border-slate-800 gap-6 shadow-2xl">
+                                    <div className="flex-1 w-full"><h2 className="text-xl font-black uppercase italic mb-4 tracking-tighter">Command Roster</h2><button onClick={syncSheet} className="w-full bg-blue-600 py-4 rounded-2xl font-black text-xs uppercase flex items-center justify-center gap-2 shadow-lg hover:bg-blue-700 active:scale-95 transition-all"><RefreshCw size={16}/> Sync Cloud Personnel</button></div>
+                                    <div className="text-center md:text-right min-w-[120px]"><div className="text-4xl font-black text-blue-500 italic leading-none">{roster.length}</div><div className="text-[10px] font-black uppercase text-slate-500 mt-1 tracking-widest leading-none">Database Entries</div></div>
+                                </div>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
+                                    {roster.sort((a,b) => b.power - a.power).map(p => (
+                                        <div key={p.id} className="bg-slate-900 p-4 rounded-2xl border border-slate-800 flex justify-between items-center group transition-all hover:border-slate-600 shadow-md"><div className="max-w-[85%]"><p className="text-xs font-bold truncate global-name">{p.name}</p><p className="text-[9px] text-slate-500 uppercase font-black">{p.class} • {p.power} PWR</p></div><button onClick={() => deleteDoc(doc(db, 'artifacts', targetAppId, 'public', 'data', 'roster', p.id))} className="text-slate-700 hover:text-rose-500 opacity-0 group-hover:opacity-100"><Trash2 size={14}/></button></div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </main>
+
+                    <footer className="fixed bottom-0 inset-x-0 h-12 border-t border-slate-800 bg-slate-950/90 backdrop-blur-md flex items-center px-6 justify-between text-[9px] font-black uppercase tracking-widest text-slate-500">
+                        <div className="flex items-center gap-4">
+                            <div className="flex items-center gap-2">
+                                <div className={`w-2 h-2 rounded-full ${user ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]' : 'bg-rose-500'}`} />
+                                <span>Cloud Connection Secure</span>
+                            </div>
+                            <div className="h-4 w-px bg-slate-800" />
+                            <div className="flex items-center gap-2 text-blue-400">
+                                <Users size={12}/>
+                                <span>{onlineCount} Officers Active</span>
+                            </div>
+                        </div>
+                        <div className="hidden sm:flex items-center gap-2 italic">
+                            <span>Vault Hunter v9.2 Stable</span>
+                        </div>
+                    </footer>
+
+                    {message && (
+                        <div className={`fixed bottom-16 left-1/2 -translate-x-1/2 px-8 py-3 rounded-full font-black text-[10px] tracking-widest z-[1000] border shadow-2xl animate-in ${message.type === 'success' ? 'bg-emerald-600 border-emerald-500' : 'bg-blue-600 border-blue-500'} text-white uppercase`}>{message.text}</div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
