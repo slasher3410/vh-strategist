@@ -50,7 +50,7 @@
 
         const { useState, useEffect, useRef, useMemo } = React;
 
-        // --- 1. FIREBASE CONFIGURATION (GLOBAL INIT) ---
+        // --- 1. FIREBASE CONFIGURATION ---
         const firebaseConfig = {
             apiKey: "AIzaSyACWatSZgxcdaa8y-YxPCZsUGDiUNyXXjA",
             authDomain: "vh-strategist.firebaseapp.com",
@@ -61,12 +61,11 @@
             measurementId: "G-GY2CZDW3HE"
         };
 
-        // Initialize outside component to prevent re-init issues
+        // Initialize outside to ensure singleton instance
         const fbApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
         const auth = getAuth(fbApp);
         const db = getFirestore(fbApp);
-        // storageId determines the Firestore folder path
-        const storageId = typeof __app_id !== 'undefined' ? __app_id : 'vh-tactical-v1'; 
+        const storageId = 'vh-tactical-v1'; 
 
         const PASSCODE = "VH2026";
         const CLASSES = ["Barbarian", "Crusader", "Demon Hunter", "Monk", "Necromancer", "Wizard", "Blood Knight", "Tempest", "Druid"];
@@ -110,18 +109,13 @@
             const scoutFileRef = useRef(null);
             const apiKey = ""; // Gemini API Key
 
-            // 1. Initial Authentication Handshake
+            // 1. Auth Init
             useEffect(() => {
                 const initAuth = async () => {
                     try {
-                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                            await signInWithCustomToken(auth, __initial_auth_token);
-                        } else {
-                            await signInAnonymously(auth);
-                        }
+                        await signInAnonymously(auth);
                     } catch (err) {
-                        console.error("Firebase Handshake Error:", err);
-                        setAuthError(err.code || "Configuration Missing");
+                        setAuthError(err.code || "Handshake Blocked");
                     }
                 };
                 initAuth();
@@ -129,45 +123,33 @@
                 return () => unsubscribe();
             }, []);
 
-            // 2. Presence Tracking (Online Log)
+            // 2. Presence tracking
             useEffect(() => {
                 if (!user || !isAuthorized) return;
-                
                 const presenceRef = doc(db, 'artifacts', storageId, 'public', 'data', 'presence', user.uid);
                 const updatePresence = () => setDoc(presenceRef, { lastSeen: Date.now() }, { merge: true });
-                
                 updatePresence();
                 const heartbeat = setInterval(updatePresence, 30000);
-
                 const unsubPresence = onSnapshot(collection(db, 'artifacts', storageId, 'public', 'data', 'presence'), snap => {
                     const now = Date.now();
                     const activeUsers = snap.docs.filter(d => (now - (d.data().lastSeen || 0)) < 90000);
                     setOnlineCount(activeUsers.length);
-                }, (err) => console.error("Presence Log Error:", err));
-
-                return () => {
-                    clearInterval(heartbeat);
-                    unsubPresence();
-                    deleteDoc(presenceRef).catch(() => {});
-                };
+                });
+                return () => { clearInterval(heartbeat); unsubPresence(); deleteDoc(presenceRef).catch(() => {}); };
             }, [user, isAuthorized]);
 
-            // 3. Real-time Listeners
+            // 3. Data Sync
             useEffect(() => {
                 if (!user || !isAuthorized) return;
-                
                 const unsubRoster = onSnapshot(collection(db, 'artifacts', storageId, 'public', 'data', 'roster'), snap => {
                     setRoster(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-                }, (err) => console.error("Roster Error:", err));
-
+                });
                 const unsubPlan = onSnapshot(doc(db, 'artifacts', storageId, 'public', 'data', 'plan', 'current'), snap => {
                     if (snap.exists()) setActivePlan(snap.data());
-                }, (err) => console.error("Plan Error:", err));
-
+                });
                 const unsubScout = onSnapshot(collection(db, 'artifacts', storageId, 'public', 'data', 'scouting'), snap => {
                     setScoutingReports(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-                }, (err) => console.error("Scouting Error:", err));
-                
+                });
                 return () => { unsubRoster(); unsubPlan(); unsubScout(); };
             }, [user, isAuthorized]);
 
@@ -191,33 +173,47 @@
             };
 
             const processRosterData = async (content, isManual = false) => {
-                if (!user) return 0;
                 const lines = content.split(/\r\n|\n|\r/).filter(l => l.trim().length > 0);
                 if (!lines.length) return 0;
                 
                 const batch = writeBatch(db);
                 const rosterColl = collection(db, 'artifacts', storageId, 'public', 'data', 'roster');
+                
+                // Clear old
                 const existing = await getDocs(rosterColl);
                 existing.forEach(d => batch.delete(d.ref));
 
                 let count = 0;
+                // If it's a sheet export, start at row 15. If it's a manual copy/paste, start at row 1.
                 const startIndex = isManual ? 0 : 14;
 
                 for (let i = startIndex; i < lines.length && count < 100; i++) {
                     const line = lines[i];
+                    // Sheets uses TAB for copy-paste, CSV uses COMMA. We handle both.
                     let cols = line.includes('\t') ? line.split('\t') : robustCSVParse(line);
                     cols = cols.map(c => c.trim().replace(/^"|"$/g, ''));
 
+                    // GREEDY DETECTION: Find which column contains a valid class name
+                    let classIdx = cols.findIndex(val => CLASSES.some(cls => cls.toLowerCase() === val.toLowerCase()));
+                    
                     let n, c, p;
-                    if (cols.length >= 6) { n = cols[3]; c = cols[4]; p = cols[5]; }
-                    else if (cols.length >= 3) { n = cols[0]; c = cols[1]; p = cols[2]; }
-                    else continue;
+                    if (classIdx !== -1) {
+                        // We found the class! Usually Name is to the left (idx-1) and Power is to the right (idx+1)
+                        c = cols[classIdx];
+                        n = cols[classIdx - 1] || cols[0]; // Fallback to first col if name not found
+                        p = cols[classIdx + 1] || "0";
+                    } else {
+                        // Fallback to strict indexes if no class is found
+                        if (cols.length >= 6) { n = cols[3]; c = cols[4]; p = cols[5]; }
+                        else if (cols.length >= 3) { n = cols[0]; c = cols[1]; p = cols[2]; }
+                        else continue;
+                    }
 
-                    if (!n || n.toLowerCase().includes("name")) continue;
+                    if (!n || n.toLowerCase().includes("name") || n.length < 2) continue;
 
                     batch.set(doc(rosterColl), {
                         name: n,
-                        class: CLASSES.find(cl => cl.toLowerCase() === c.toLowerCase()) || 'Barbarian',
+                        class: CLASSES.find(cl => cl.toLowerCase() === c?.toLowerCase()) || 'Barbarian',
                         power: parseInt(p?.replace(/[^\d]/g, '')) || 0,
                         updatedAt: Date.now()
                     });
@@ -230,16 +226,34 @@
             const syncSheet = async () => {
                 const url = "https://docs.google.com/spreadsheets/d/e/2PACX-1vT-BnLQTULXGprJlOeOsDQQmvQISTFuKI9wsvDSX7A8YLiBOEF9ljpOPD_QW2Jp5NhJF-fjmxWozE0J/pub?gid=254744248&single=true&output=csv";
                 setIsProcessing(true);
-                notify("Pulling Datastream...", "info");
+                notify("Connecting to Datastream...", "info");
                 try {
                     const res = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`);
+                    if (!res.ok) throw new Error();
                     const text = await res.text();
                     const count = await processRosterData(text, false);
-                    notify(`Success: ${count} Members Sync'd`, "success");
+                    if (count > 0) notify(`Success: ${count} Members Sync'd`, "success");
+                    else notify("Empty Result: Check spreadsheet row 15.", "rose");
                 } catch (e) { 
-                    notify("Sync Timeout. Use manual override box.", "rose"); 
+                    notify("Proxy Blocked: Please use Manual Paste box.", "rose"); 
                     setShowManualBox(true);
                 } finally { setIsProcessing(false); }
+            };
+
+            const applyManualPaste = async () => {
+                if (!manualCsv.trim()) return notify("Paste data first", "rose");
+                setIsProcessing(true);
+                try {
+                    const count = await processRosterData(manualCsv, true);
+                    if (count > 0) { 
+                        notify(`Imported ${count} Members`, "success"); 
+                        setManualCsv(""); 
+                        setShowManualBox(false); 
+                    } else {
+                        notify("Import Failed: Names/Classes not detected.", "rose");
+                    }
+                } catch (e) { notify("Database refused write.", "rose"); }
+                finally { setIsProcessing(false); }
             };
 
             const handleScoutScan = async (e) => {
@@ -247,15 +261,15 @@
                 const files = e.target.files;
                 if (!files.length) return;
                 setIsProcessing(true);
-                notify(`AI Intelligence Analysis...`, "info");
+                notify(`AI Analysis: Scanning Intelligence...`, "info");
                 try {
                     const base64 = await new Promise(r => {
                         const reader = new FileReader();
                         reader.onload = () => r(reader.result.split(',')[1]);
                         reader.readAsDataURL(files[0]);
                     });
-                    const sideMsg = selectedSide === 'red' ? "ONLY RED names." : "ONLY BLUE names.";
-                    const prompt = `JSON: {"matches": [{"player": "Name", "room": "Exalted-1"}]}. ${sideMsg} Diablo screenshots.`;
+                    const instruction = selectedSide === 'red' ? "STRICT: Only RED names." : "STRICT: Only BLUE names.";
+                    const prompt = `JSON: {"matches": [{"player": "Name", "room": "Exalted-1"}]}. ${instruction} Diablo character names.`;
                     const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
                         method: 'POST',
                         body: JSON.stringify({ contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType: "image/png", data: base64 } }] }] })
@@ -268,7 +282,7 @@
                         side: selectedSide, 
                         timestamp: Date.now() 
                     });
-                    notify("Intel Secured", "success");
+                    notify("Intelligence Shared", "success");
                 } catch (err) { notify("AI Blocked", "rose"); }
                 finally { setIsProcessing(false); }
             };
@@ -304,7 +318,7 @@
                     </header>
 
                     <main className="max-w-6xl mx-auto p-4 sm:p-6 animate-in">
-                        {activeTab === 'war' ? (
+                        {activeTab === 'war' && (
                             <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
                                 <div className="space-y-4">
                                     <div className="bg-slate-900 p-5 rounded-3xl border border-slate-800 shadow-xl">
@@ -319,9 +333,8 @@
                                                     else if (i < 48) assigns[p.id] = `eminent-${roomNum}`;
                                                     else assigns[p.id] = `famed-${roomNum}`;
                                                 });
-                                                const planRef = doc(db, 'artifacts', storageId, 'public', 'data', 'plan', 'current');
-                                                await setDoc(planRef, { strategy: s.id, assignments: assigns, confirmations: activePlan.confirmations || {} }, { merge: true });
-                                                notify("Cloud Alignment Saved", "success");
+                                                await setDoc(doc(db, 'artifacts', storageId, 'public', 'data', 'plan', 'current'), { strategy: s.id, assignments: assigns, confirmations: activePlan.confirmations || {} }, { merge: true });
+                                                notify("Strategic Alignment Saved", "success");
                                             }} className={`w-full text-left p-3 mb-2 rounded-xl border-2 transition-all ${activePlan.strategy === s.id ? 'border-blue-500 bg-blue-900/10' : 'border-transparent bg-slate-800'}`}>
                                                 <div className="text-xs font-bold uppercase">{s.name}</div>
                                                 <p className="text-[9px] text-slate-500">{s.desc}</p>
@@ -341,16 +354,14 @@
                                                         <div key={room} className="bg-slate-900 rounded-2xl border border-slate-800 p-3 min-h-[100px]">
                                                             <div className="flex justify-between items-center mb-3 pb-2 border-b border-slate-800"><span className="text-[10px] font-bold text-slate-400">Room {n}</span><span className="text-[9px] font-black text-blue-500">{members.length}</span></div>
                                                             {members.map(m => {
-                                                                const statusKey = activePlan.confirmations?.[m.id] || 'unconfirmed';
-                                                                const status = CONFIRMATION_STATES[statusKey];
+                                                                const status = CONFIRMATION_STATES[activePlan.confirmations?.[m.id] || 'unconfirmed'];
                                                                 return (
                                                                     <div key={m.id} className="flex justify-between items-center bg-black/40 p-2 rounded-lg mb-1 group">
                                                                         <span className="text-[10px] font-bold truncate pr-2 global-name">{m.name}</span>
                                                                         <button onClick={async () => {
                                                                             const states = ['unconfirmed', 'confirmed', 'busy'];
-                                                                            const next = states[(states.indexOf(statusKey) + 1) % states.length];
-                                                                            const planRef = doc(db, 'artifacts', storageId, 'public', 'data', 'plan', 'current');
-                                                                            await setDoc(planRef, { confirmations: { ...activePlan.confirmations, [m.id]: next } }, { merge: true });
+                                                                            const next = states[(states.indexOf(activePlan.confirmations?.[m.id] || 'unconfirmed') + 1) % states.length];
+                                                                            await setDoc(doc(db, 'artifacts', storageId, 'public', 'data', 'plan', 'current'), { confirmations: { ...activePlan.confirmations, [m.id]: next } }, { merge: true });
                                                                         }} className={`p-1 transition-colors text-${status.color}-500`}>{status.icon}</button>
                                                                     </div>
                                                                 );
@@ -363,11 +374,13 @@
                                     ))}
                                 </div>
                             </div>
-                        ) : activeTab === 'scouting' ? (
+                        )}
+
+                        {activeTab === 'scouting' && (
                             <div className="space-y-6">
                                 <div className="flex flex-col md:flex-row justify-between items-start md:items-end bg-slate-900 p-6 rounded-3xl border border-slate-800 gap-6 shadow-2xl">
                                     <div className="space-y-4 w-full">
-                                        <h2 className="text-xl font-black uppercase text-blue-500 italic tracking-tighter">Target Intel Hub</h2>
+                                        <h2 className="text-xl font-black uppercase text-blue-500 italic tracking-tighter">Intelligence Hub</h2>
                                         <div className="flex flex-wrap gap-2">
                                             <button onClick={() => setSelectedScoutClan('All Intelligence')} className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase border transition-all ${selectedScoutClan === 'All Intelligence' ? 'bg-blue-600 border-blue-500 text-white shadow-lg' : 'bg-slate-950 border-slate-800 text-slate-500'}`}>OVERVIEW</button>
                                             {TARGET_CLANS.map(clan => (
@@ -376,7 +389,7 @@
                                         </div>
                                         <div className="flex gap-2 bg-black p-1 rounded-xl w-fit border border-slate-800 shadow-inner">
                                             <button onClick={() => setSelectedSide('red')} className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all flex items-center gap-2 ${selectedSide === 'red' ? 'bg-rose-600 text-white shadow-lg' : 'text-slate-500'}`}><Target size={12} /> Red (Enemy)</button>
-                                            <button onClick={() => setSelectedSide('blue')} className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all flex items-center gap-2 ${selectedSide === 'blue' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-500'}`}><Shield size={12} /> Blue (Ally)</button>
+                                            <button onClick={() => setSelectedSide('blue')} className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all flex items-center gap-2 ${selectedSide === 'blue' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-500'}`}><Shield size={12} /> Blue (Friendly)</button>
                                         </div>
                                     </div>
                                     <input type="file" ref={scoutFileRef} className="hidden" onChange={handleScoutScan} accept="image/*" />
@@ -386,12 +399,14 @@
                                     {scoutingReports.filter(r => selectedScoutClan === 'All Intelligence' || r.clanName === selectedScoutClan).sort((a,b) => b.timestamp - a.timestamp).map(report => (
                                         <div key={report.id} className={`bg-slate-900 p-4 rounded-2xl border ${report.side === 'red' ? 'border-rose-900/30' : 'border-blue-900/30'} shadow-xl transition-all`}>
                                             <div className="flex justify-between items-center mb-3"><div className="flex flex-col"><span className={`text-[10px] font-black uppercase ${report.side === 'red' ? 'text-rose-500' : 'text-blue-500'}`}>{report.clanName || "Detected"}</span><span className="text-[8px] font-bold text-slate-500 uppercase">{new Date(report.timestamp).toLocaleDateString()}</span></div><button onClick={() => deleteDoc(doc(db, 'artifacts', storageId, 'public', 'data', 'scouting', report.id))} className="text-slate-700 hover:text-rose-500"><Trash2 size={14}/></button></div>
-                                            <div className="flex flex-wrap gap-1">{report.matches?.map((m, i) => <span key={i} className="text-[8px] bg-black px-1.5 py-0.5 rounded border border-slate-800 global-name">{m.player}</span>)}</div>
+                                            <div className="flex flex-wrap gap-1">{report.matches?.map((m, i) => <span key={i} className="text-[8px] bg-black px-1.5 py-0.5 rounded opacity-80 border border-slate-800 global-name">{m.player}</span>)}</div>
                                         </div>
                                     ))}
                                 </div>
                             </div>
-                        ) : (
+                        )}
+
+                        {activeTab === 'roster' && (
                             <div className="space-y-6">
                                 <div className="flex flex-col md:flex-row justify-between items-center bg-slate-900 p-8 rounded-3xl border border-slate-800 gap-6 shadow-2xl">
                                     <div className="flex-1 w-full">
@@ -411,16 +426,9 @@
                                 {showManualBox && (
                                     <div className="bg-slate-900 border border-blue-500/20 p-6 rounded-3xl animate-in">
                                         <h4 className="text-xs font-black uppercase text-blue-400 mb-2 flex items-center gap-2"><ClipboardList size={14}/> Manual Override (Spreadsheet Paste)</h4>
-                                        <p className="text-[9px] text-slate-500 mb-4 italic">Highlight columns <b>D, E, and F</b> from row 15 down, copy them, and paste them here.</p>
+                                        <p className="text-[9px] text-slate-500 mb-4 italic">Highlight columns <b>D, E, and F</b> from row 15 down in your Google Sheet, copy them, and paste them here.</p>
                                         <textarea value={manualCsv} onChange={e => setManualCsv(e.target.value)} placeholder="Paste spreadsheet cells here..." className="w-full bg-black border border-slate-800 p-4 rounded-xl text-[10px] outline-none focus:border-blue-500 text-slate-300 font-mono h-48 no-scrollbar resize-none shadow-inner" />
-                                        <button onClick={async () => {
-                                            if (!manualCsv.trim()) return notify("Paste data first", "rose");
-                                            setIsProcessing(true);
-                                            const count = await processRosterData(manualCsv, true);
-                                            if (count > 0) { notify(`Success: ${count} Members Imported`, "success"); setManualCsv(""); setShowManualBox(false); }
-                                            else notify("Import Failed", "rose");
-                                            setIsProcessing(false);
-                                        }} className="mt-4 w-full bg-blue-600 hover:bg-blue-700 py-3 rounded-xl font-black uppercase text-[10px] tracking-widest text-white transition-all border border-blue-700 shadow-xl">Process Manual Paste</button>
+                                        <button onClick={applyManualPaste} className="mt-4 w-full bg-blue-600 hover:bg-blue-700 py-3 rounded-xl font-black uppercase text-[10px] tracking-widest text-white transition-all border border-blue-700 shadow-xl">Process Manual Paste</button>
                                     </div>
                                 )}
 
@@ -452,7 +460,7 @@
                             </div>
                         </div>
                         <div className="hidden sm:flex items-center gap-2 italic">
-                            <span>Vault Hunter Hub v9.9.5 Stable</span>
+                            <span>Vault Hunter Hub v9.9.8 Deployment</span>
                         </div>
                     </footer>
 
